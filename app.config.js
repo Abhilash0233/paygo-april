@@ -1,7 +1,7 @@
 export default {
   expo: {
     name: "PayGo March",
-    slug: "paygo-march-app",
+    slug: "making-new",
     version: "1.2.0",
     orientation: "portrait",
     icon: "./assets/main2.png",
@@ -66,7 +66,7 @@ export default {
       twilioVerifyServiceSid: "TWILIO_VERIFY_SERVICE_SID_PLACEHOLDER",
       devMode: false,
       eas: {
-        projectId: "627aa406-983b-41fc-872f-b73f0eb7dcad"
+        projectId: "3dd5e8ee-ba25-450b-a634-c80f20d551a9"
       }
     },
     newArchEnabled: true

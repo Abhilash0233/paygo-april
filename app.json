@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Paygo.fit",
-    "slug": "paygofit-app",
+    "slug": "making-new",
     "version": "1.2.4",
     "orientation": "portrait",
     "icon": "./assets/main2.png",
@@ -81,7 +81,7 @@
     "description": "An app for booking sessions at nearby fitness centers",
     "extra": {
       "eas": {
-        "projectId": "4451704b-2328-4ff3-92cb-7f8ce80356b6"
+        "projectId": "3dd5e8ee-ba25-450b-a634-c80f20d551a9"
       }
     }
   }
