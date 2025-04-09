@@ -1,0 +1,2078 @@
+/**
+ * CenterDetailScreen - Shows details of a fitness center
+ * 
+ * NOTE: Favorites functionality has been migrated to use Supabase instead of Firebase.
+ * The saving/unsaving of centers is now handled via the Supabase 'favorites' table.
+ */
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  Image,
+  ScrollView,
+  TouchableOpacity,
+  Linking,
+  ActivityIndicator,
+  StatusBar,
+  Dimensions,
+  FlatList,
+  Platform,
+  Modal,
+  SafeAreaView as RNSafeAreaView,
+  Animated,
+  Alert,
+  Vibration,
+  ToastAndroid,
+  RefreshControl,
+  TouchableWithoutFeedback
+} from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useNavigation, useRoute, RouteProp, useFocusEffect, CommonActions, CompositeNavigationProp } from '@react-navigation/native';
+import { StackNavigationProp } from '@react-navigation/stack';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import BookingOverlay from '../../components/BookingOverlay';
+import { useSafeAreaInsets, EdgeInsets } from 'react-native-safe-area-context';
+import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
+import * as Haptics from 'expo-haptics';
+import BookingPreviewOverlay from '../../components/BookingPreviewOverlay';
+import { format } from 'date-fns';
+import { toggleSaveCenter, isCenterSaved } from '../../services/supabase/favoriteService';
+import { RootStackParamList } from '../../navigation/AppNavigator';
+import { HomeStackParamList } from '../../navigation/HomeStack';
+import { useAuth } from '../../services/authContext';
+import { getCenterImageUrl } from '../../utils/imageHelpers';
+import { fetchCenterDetails, Center } from '../../services/supabase/centerService';
+import { saveBooking } from '../../services/supabase/bookingService';
+import { deductFromWallet, getUserWalletBalance } from '../../services/walletService';
+import SkeletonView from '../../components/SkeletonView';
+import LoginOverlay from '../../components/LoginOverlay';
+import * as Location from 'expo-location';
+import {
+  PinchGestureHandler,
+  PinchGestureHandlerGestureEvent,
+  State,
+  GestureHandlerRootView,
+} from 'react-native-gesture-handler';
+
+type CenterDetailScreenNavigationProp = CompositeNavigationProp<
+  StackNavigationProp<HomeStackParamList, 'CenterDetail'>,
+  StackNavigationProp<RootStackParamList>
+>;
+type CenterDetailScreenRouteProp = RouteProp<HomeStackParamList, 'CenterDetail'>;
+
+interface Props {
+  route: CenterDetailScreenRouteProp & {
+    params: {
+      centerId: string;
+      distance?: string;
+      userCoordinates?: {
+        latitude: number;
+        longitude: number;
+      };
+    }
+  };
+  navigation: CenterDetailScreenNavigationProp;
+}
+
+const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
+const IMAGE_HEIGHT = screenHeight * 0.45; // Use 45% of screen height for images
+const SPACING = {
+  TINY: 4,
+  SMALL: 8,
+  MEDIUM: 12,
+  STANDARD: 16,
+  LARGE: 24,
+  XLARGE: 32,
+};
+
+// Simplify the helper function to format location - just extract street and locality
+const extractLocationShortForm = (address: string): string => {
+  const addressParts = address.split(',').map(part => part.trim());
+  
+  // If there are at least 2 parts, use first two parts (street and locality)
+  if (addressParts.length >= 2) {
+    return `${addressParts[0]}, ${addressParts[1]}`;
+  }
+  
+  // If there's only one part, return it as is
+  return addressParts[0] || '';
+};
+
+// Update formatDistanceInKm to accept a number parameter
+const formatDistanceInKm = (distance: number | undefined): string => {
+  if (distance === undefined) return 'Distance not available';
+  if (distance < 1) {
+    return `${Math.round(distance * 1000)} m away`;
+  } else if (distance < 10) {
+    return `${distance.toFixed(1)} km away`;
+  } else {
+    return `${Math.round(distance)} km away`;
+  }
+};
+
+// Helper function to get appropriate icon for each amenity
+const getAmenityIcon = (amenity: string): keyof typeof Ionicons.glyphMap => {
+  // Convert to lowercase for case-insensitive matching
+  const amenityLower = amenity.toLowerCase().trim();
+  console.log(`Matching icon for amenity: ${amenityLower}`);
+  
+  // Special case for AC - check first before other matches
+  if (amenityLower === 'ac' || 
+      amenityLower.includes('ac ') || 
+      amenityLower.includes(' ac') || 
+      amenityLower.includes('a/c') || 
+      amenityLower.includes('air conditioning') || 
+      amenityLower.includes('air-conditioning')) {
+    console.log('AC match found - using snow icon');
+    return 'snow';
+  }
+
+  // Map amenities to appropriate Ionicons
+  const amenityIcons: Record<string, keyof typeof Ionicons.glyphMap> = {
+    // Gym equipment
+    'treadmill': 'fitness-outline',
+    'cardio area': 'heart-outline',
+    'cardio': 'heart-outline',
+    'cardio equipment': 'heart-outline',
+    'functional training': 'barbell-outline',
+    'functional': 'barbell-outline',
+    'weight training': 'barbell-outline',
+    'weights': 'barbell-outline',
+    'strength training': 'barbell-outline',
+    'strength': 'barbell-outline',
+    'free weights': 'barbell-outline',
+    'dumbbells': 'barbell-outline',
+    'barbells': 'barbell-outline',
+    'crossfit': 'trending-up-outline',
+    'cross fit': 'trending-up-outline',
+    'hiit': 'flash-outline',
+    'high intensity': 'flash-outline',
+    'squat rack': 'barbell-outline',
+    'bench press': 'barbell-outline',
+    'leg press': 'barbell-outline',
+    'cable machine': 'barbell-outline',
+    'smith machine': 'barbell-outline',
+    'kettlebells': 'barbell-outline',
+    'fitness studio': 'fitness-outline',
+    'gym': 'barbell-outline',
+    'dumbbell': 'barbell-outline',
+    
+    // Yoga
+    'yoga mats': 'body-outline',
+    'yoga': 'body-outline',
+    'yoga studio': 'body-outline',
+    'meditation': 'leaf-outline',
+    'meditation area': 'leaf-outline',
+    'pilates': 'body-outline',
+    'stretching': 'body-outline',
+    'stretching area': 'body-outline',
+    
+    // Swimming
+    'swimming pool': 'water-outline',
+    'pool': 'water-outline',
+    'lap pool': 'water-outline',
+    'swimming': 'water-outline',
+    
+    // Sports
+    'badminton court': 'tennisball-outline',
+    'badminton': 'tennisball-outline',
+    'cricket nets': 'baseball-outline',
+    'cricket': 'baseball-outline',
+    'tennis court': 'tennisball-outline',
+    'tennis': 'tennisball-outline',
+    'pickle ball court': 'tennisball-outline',
+    'pickle ball': 'tennisball-outline',
+    'pickleball': 'tennisball-outline',
+    'basketball court': 'basketball-outline',
+    'basketball': 'basketball-outline',
+    'volleyball court': 'american-football-outline',
+    'volleyball': 'american-football-outline',
+    'table tennis': 'tennisball-outline',
+    'ping pong': 'tennisball-outline',
+    'squash': 'tennisball-outline',
+    'soccer': 'football-outline',
+    'football': 'football-outline',
+    
+    // Facilities
+    'parking': 'car-outline',
+    'parking lot': 'car-outline',
+    'shower': 'water-outline',
+    'showers': 'water-outline',
+    'changing room': 'shirt-outline',
+    'changing rooms': 'shirt-outline',
+    'locker': 'lock-closed-outline',
+    'lockers': 'lock-closed-outline',
+    'locker room': 'lock-closed-outline',
+    'wifi': 'wifi-outline',
+    'free wifi': 'wifi-outline',
+    'water': 'water-outline',
+    'mineral water': 'water-outline',
+    'drinking water': 'water-outline',
+    'first aid': 'medkit-outline',
+    'medical kit': 'medkit-outline',
+    'basic guidance': 'information-circle-outline',
+    'trainer': 'person-outline',
+    'personal trainer': 'person-outline',
+    'trainers': 'people-outline',
+    'instructor': 'person-outline',
+    'coach': 'person-outline',
+    'guidance': 'information-circle-outline',
+    'lift': 'arrow-up-outline',
+    'elevator': 'arrow-up-outline',
+    'towels': 'archive-outline',
+    'towel service': 'archive-outline',
+    'sauna': 'flame-outline',
+    'steam room': 'cloud-outline',
+    'steam': 'cloud-outline',
+    'jacuzzi': 'water-outline',
+    'hot tub': 'water-outline',
+    'spa': 'leaf-outline',
+    'massage': 'hand-left-outline',
+    'cafe': 'cafe-outline',
+    'juice bar': 'cafe-outline',
+    'snacks': 'restaurant-outline',
+    'supplements': 'nutrition-outline',
+    'child care': 'people-outline',
+    'childcare': 'people-outline',
+    'kids area': 'people-outline',
+    'tv': 'tv-outline',
+    'television': 'tv-outline',
+    'music': 'musical-notes-outline',
+    'sound system': 'musical-notes-outline',
+    
+    // Defaults for anything else
+    'default': 'checkmark-circle-outline'
+  };
+  
+  // Try to find a match in our icons mapping
+  for (const [key, value] of Object.entries(amenityIcons)) {
+    if (amenityLower.includes(key) || key.includes(amenityLower)) {
+      console.log(`Matched amenity "${amenityLower}" with icon "${value}" via key "${key}"`);
+      return value;
+    }
+  }
+  
+  // Return default icon if no match found
+  console.log(`No match found for "${amenityLower}", using default icon`);
+  return amenityIcons['default'];
+};
+
+// Function to categorize amenities as equipment or other
+const categorizeAmenities = (amenities: string[] = []): { equipment: string[], other: string[] } => {
+  // Equipment-related amenities
+  const equipmentTypes = [
+    'Treadmill', 'Cardio Area', 'Functional Training', 'Weight Training', 
+    'Yoga Mats', 'Strength Training', 'Free Weights', 'CrossFit',
+    'HIIT', 'Swimming Pool', 'Pool', 'Lap Pool',
+    'Badminton Court', 'Tennis Court', 'Pickle Ball Court',
+    'Dance Studio', 'Aerobics'
+  ];
+  
+  const equipment: string[] = [];
+  const other: string[] = [];
+  
+  amenities.forEach(amenity => {
+    if (equipmentTypes.includes(amenity)) {
+      equipment.push(amenity);
+    } else {
+      other.push(amenity);
+    }
+  });
+  
+  return { equipment, other };
+};
+
+// Function to group amenities in rows of 3 for better display
+const chunkArray = <T,>(array: T[], size: number): T[][] => {
+  return array.reduce((chunks, item, index) => {
+    if (index % size === 0) {
+      chunks.push([item]);
+    } else {
+      chunks[chunks.length - 1].push(item);
+    }
+    return chunks;
+  }, [] as T[][]);
+};
+
+// Things to know static data
+const THINGS_TO_KNOW = [
+  {
+    icon: 'time-outline',
+    text: 'Please arrive 10 minutes before your session'
+  },
+  {
+    icon: 'water-outline',
+    text: 'Bring your own water bottle and towel'
+  },
+  {
+    icon: 'shirt-outline',
+    text: 'Wear comfortable workout clothes and shoes'
+  },
+  {
+    icon: 'card-outline',
+    text: 'Carry your ID proof for first-time visit'
+  },
+  {
+    icon: 'medkit-outline',
+    text: 'Inform trainers about any health conditions'
+  }
+];
+
+function createStyles(insets: EdgeInsets) {
+  return StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: '#F8F9FA',
+    },
+    loadingContainer: {
+      flex: 1,
+      justifyContent: 'center',
+      alignItems: 'center',
+      padding: 32,
+    },
+    loadingText: {
+      marginTop: 12,
+      fontSize: 16,
+      color: '#666666',
+      textAlign: 'center',
+    },
+    errorContainer: {
+      flex: 1,
+      justifyContent: 'center',
+      alignItems: 'center',
+      padding: 32,
+    },
+    errorText: {
+      marginVertical: 24,
+      fontSize: 16,
+      color: '#666666',
+      textAlign: 'center',
+    },
+    backButtonText: {
+      color: '#FFFFFF',
+      fontWeight: '600',
+      fontSize: 16,
+    },
+    imageLoadingContainer: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      justifyContent: 'center',
+      alignItems: 'center',
+      backgroundColor: 'rgba(0,0,0,0.1)',
+    },
+    scrollView: {
+      flex: 1,
+      paddingBottom: Platform.OS === 'ios' ? 90 : 72, // Add padding to account for footer
+    },
+    scrollViewContent: {
+      paddingBottom: Platform.OS === 'ios' ? 90 : 120, // Increase padding for Android to account for footer
+    },
+    galleryContainer: {
+      height: screenHeight * 0.4,
+      position: 'relative',
+    },
+    centerImageContainer: {
+      width: screenWidth,
+      height: '100%',
+    },
+    centerImage: {
+      width: '100%',
+      height: '100%',
+    },
+    headerOverlay: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      height: 80,
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingHorizontal: 16,
+      paddingTop: insets.top,
+    },
+    backButton: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      backgroundColor: 'rgba(0, 0, 0, 0.3)',
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    saveButton: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      backgroundColor: 'rgba(0, 0, 0, 0.3)',
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    paginationContainer: {
+      position: 'absolute',
+      bottom: 16,
+      left: 0,
+      right: 0,
+      flexDirection: 'row',
+      justifyContent: 'center',
+      gap: 8,
+    },
+    paginationDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: 'rgba(255, 255, 255, 0.5)',
+    },
+    paginationDotActive: {
+      backgroundColor: '#FFF',
+      width: 20,
+    },
+    contentContainer: {
+      padding: 16,
+      gap: 16,
+    },
+    card: {
+      backgroundColor: '#FFF',
+      borderRadius: 16,
+      padding: 16,
+      shadowColor: '#000',
+      shadowOffset: {
+        width: 0,
+        height: 2,
+      },
+      shadowOpacity: 0.05,
+      shadowRadius: 3.84,
+      elevation: 2,
+    },
+    cardHeader: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginBottom: 8,
+    },
+    centerHeader: {
+      gap: 12,
+    },
+    centerTitleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    centerName: {
+      fontSize: 24,
+      fontWeight: '600',
+      color: '#000',
+      flex: 1,
+    },
+    womenOnlyTag: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: 'rgba(255, 92, 141, 0.1)',
+      paddingVertical: 4,
+      paddingHorizontal: 8,
+      borderRadius: 12,
+      gap: 4,
+    },
+    womenOnlyText: {
+      fontSize: 12,
+      color: '#FF5C8D',
+      fontWeight: '500',
+    },
+    locationRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    locationInfo: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      flex: 1,
+    },
+    locationText: {
+      fontSize: 15,
+      color: '#666',
+      flex: 1,
+    },
+    directionsButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      paddingVertical: 6,
+      paddingHorizontal: 12,
+      backgroundColor: 'rgba(17, 131, 71, 0.1)',
+      borderRadius: 8,
+    },
+    directionsText: {
+      fontSize: 14,
+      color: '#118347',
+      fontWeight: '500',
+    },
+    descriptionText: {
+      fontSize: 15,
+      color: '#666',
+      lineHeight: 22,
+    },
+    cardTitle: {
+      fontSize: 18,
+      fontWeight: '600',
+      color: '#000',
+      marginBottom: 8,
+    },
+    amenitiesContainer: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 8,
+    },
+    amenityChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      paddingVertical: 6,
+      paddingHorizontal: 10,
+      backgroundColor: 'rgba(17, 131, 71, 0.1)',
+      borderRadius: 20,
+    },
+    amenityChipText: {
+      fontSize: 14,
+      color: '#118347',
+    },
+    thingsToKnowList: {
+      gap: 16,
+    },
+    thingsToKnowItem: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 16,
+    },
+    thingsToKnowText: {
+      fontSize: 15,
+      color: '#333',
+      flex: 1,
+      flexWrap: 'wrap',
+      lineHeight: 22,
+    },
+    stickyButtonContainer: {
+      position: 'absolute',
+      bottom: 0,
+      left: 0,
+      right: 0,
+      backgroundColor: '#FFFFFF',
+      paddingHorizontal: 16,
+      paddingTop: 12,
+      paddingBottom: insets.bottom > 0 ? insets.bottom : 16,
+      borderTopWidth: 1,
+      borderTopColor: '#F0F0F0',
+      shadowColor: '#000',
+      shadowOffset: {
+        width: 0,
+        height: -2,
+      },
+      shadowOpacity: 0.05,
+      shadowRadius: 3,
+      elevation: 4,
+    },
+    bookingButton: {
+      height: 56,
+      backgroundColor: '#118347',
+      borderRadius: 12,
+      justifyContent: 'center',
+      alignItems: 'center',
+      flexDirection: 'row',
+    },
+    bookingButtonText: {
+      fontSize: 16,
+      fontWeight: '600',
+      color: '#FFFFFF',
+      marginRight: 8,
+    },
+    infoRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      marginBottom: 12,
+    },
+    infoContent: {
+      flex: 1,
+      marginLeft: 12,
+    },
+    infoLabel: {
+      fontSize: 14,
+      color: '#666666',
+      marginBottom: 4,
+    },
+    infoValue: {
+      fontSize: 16,
+      color: '#000000',
+      lineHeight: 22,
+    },
+    socialLink: {
+      marginTop: 2,
+    },
+    socialLinkText: {
+      fontSize: 16,
+      color: '#118347',
+      textDecorationLine: 'underline',
+    },
+    imageViewerContainer: {
+      flex: 1,
+      backgroundColor: '#000',
+    },
+    imageViewerHeader: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      zIndex: 1,
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      padding: 16,
+      paddingTop: Platform.OS === 'ios' ? 44 : 16,
+      backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    },
+    closeButton: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      backgroundColor: 'rgba(0, 0, 0, 0.5)',
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    imageCounter: {
+      color: '#FFF',
+      fontSize: 16,
+      fontWeight: '500',
+    },
+    fullScreenImageContainer: {
+      width: screenWidth,
+      height: screenHeight,
+      justifyContent: 'center',
+      alignItems: 'center',
+      backgroundColor: '#000',
+      overflow: 'hidden',
+    },
+    fullScreenImage: {
+      width: screenWidth,
+      height: screenHeight,
+      resizeMode: 'contain',
+    },
+    fullScreenLoadingContainer: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      justifyContent: 'center',
+      alignItems: 'center',
+      backgroundColor: 'rgba(0,0,0,0.1)',
+    },
+    footer: {
+      position: 'absolute',
+      bottom: 0,
+      left: 0,
+      right: 0,
+      backgroundColor: '#FFF',
+      paddingHorizontal: 16,
+      paddingTop: 16,
+      paddingBottom: Platform.OS === 'ios' ? 34 : 16,
+      borderTopWidth: 1,
+      borderTopColor: '#EEEEEE',
+      zIndex: 1000,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: -3 },
+      shadowOpacity: 0.1,
+      shadowRadius: 4,
+      elevation: 5,
+    },
+    footerContent: {
+      gap: 12,
+    },
+    priceContainer: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingHorizontal: 4,
+    },
+    priceLabel: {
+      fontSize: 14,
+      color: '#666666',
+    },
+    priceValue: {
+      fontSize: 18,
+      fontWeight: '600',
+      color: '#118347',
+    },
+    titleRightContainer: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    instagramButton: {
+      padding: 4,
+    },
+    divider: {
+      height: 1,
+      backgroundColor: '#E0E0E0',
+      marginVertical: 12,
+    },
+    amenitiesSection: {
+      marginBottom: 16,
+    },
+    amenitiesSectionTitle: {
+      fontSize: 16,
+      fontWeight: '600',
+      color: '#333',
+      marginBottom: 8,
+    },
+    tabContainer: {
+      flexDirection: 'row',
+      marginBottom: 16,
+      backgroundColor: '#F5F5F5',
+      borderRadius: 8,
+      padding: 4,
+    },
+    tabButton: {
+      flex: 1,
+      paddingVertical: 8,
+      alignItems: 'center',
+      borderRadius: 6,
+    },
+    tabButtonActive: {
+      backgroundColor: '#FFFFFF',
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.1,
+      shadowRadius: 4,
+      elevation: 2,
+    },
+    tabButtonText: {
+      fontSize: 14,
+      color: '#666666',
+      fontWeight: '500',
+    },
+    tabButtonTextActive: {
+      color: '#118347',
+      fontWeight: '600',
+    },
+    tabContent: {
+      minHeight: 100,
+    },
+    noAmenitiesText: {
+      fontSize: 14,
+      color: '#666666',
+      textAlign: 'center',
+      marginTop: 20,
+    },
+    imageContainer: {
+      width: '100%',
+      height: 300,
+      position: 'relative',
+    },
+    skeletonImage: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      zIndex: 1,
+    },
+    hiddenImage: {
+      opacity: 0,
+    },
+    headerButtons: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      paddingHorizontal: 16,
+      paddingTop: Platform.OS === 'ios' ? insets.top + 8 : insets.top + 16,
+      zIndex: 10,
+    },
+    headerButton: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      backgroundColor: 'rgba(0, 0, 0, 0.3)',
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+  });
+}
+
+const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+  const R = 6371; // Earth's radius in kilometers
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = 
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+    Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  const distance = R * c; // Distance in kilometers
+  return Number(distance.toFixed(1));
+};
+
+function CenterDetailScreen({ route, navigation }: Props) {
+  const { centerId, distance, userCoordinates } = route.params;
+  const { user, isAuthenticated } = useAuth();
+  
+  const insets = useSafeAreaInsets();
+  const styles = createStyles(insets);
+  const [center, setCenter] = useState<Center | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedTab, setSelectedTab] = useState<'equipment' | 'facilities'>('equipment');
+  const [activeImageIndex, setActiveImageIndex] = useState(0);
+  const flatListRef = useRef<FlatList>(null);
+  
+  // Initialize calculated distance from the route params if available
+  const [calculatedDistance, setCalculatedDistance] = useState<string | undefined>(
+    distance ? `${distance} away` : undefined
+  );
+  
+  // Add useEffect to calculate distance when center details are loaded if not already available
+  useEffect(() => {
+    if (!calculatedDistance && center && center.latitude && center.longitude && userCoordinates) {
+      try {
+        const centerLat = typeof center.latitude === 'string' ? parseFloat(center.latitude) : center.latitude;
+        const centerLon = typeof center.longitude === 'string' ? parseFloat(center.longitude) : center.longitude;
+        
+        if (!isNaN(centerLat) && !isNaN(centerLon)) {
+          const distanceInKm = calculateDistance(
+            userCoordinates.latitude,
+            userCoordinates.longitude,
+            centerLat,
+            centerLon
+          );
+          
+          setCalculatedDistance(formatDistanceInKm(distanceInKm));
+        }
+      } catch (err) {
+        console.error('Error calculating distance:', err);
+      }
+    }
+  }, [center, userCoordinates, calculatedDistance]);
+  
+  // Add state for full-screen image viewer
+  const [isImageViewerVisible, setIsImageViewerVisible] = useState(false);
+  const [selectedImageIndex, setSelectedImageIndex] = useState(0);
+  const [scale, setScale] = useState(1);
+  const baseScale = useRef(1);
+  const pinchRef = useRef(null);
+  const fullScreenFlatListRef = useRef<FlatList>(null);
+  const [isZooming, setIsZooming] = useState(false);
+  const [imagesLoading, setImagesLoading] = useState<{[key: string]: boolean}>({});
+  
+  // Remove parallax effect for simpler scrolling
+  const scrollY = useRef(new Animated.Value(0)).current;
+  
+  // Calculate header opacity and background
+  const headerOpacity = scrollY.interpolate({
+    inputRange: [0, IMAGE_HEIGHT * 0.4, IMAGE_HEIGHT * 0.6],
+    outputRange: [0, 0.5, 1],
+    extrapolate: 'clamp'
+  });
+  
+  const headerBackgroundColor = scrollY.interpolate({
+    inputRange: [0, IMAGE_HEIGHT * 0.6],
+    outputRange: ['transparent', '#FFFFFF'],
+    extrapolate: 'clamp'
+  });
+  
+  // Header buttons animated style
+  const headerButtonStyle = scrollY.interpolate({
+    inputRange: [0, IMAGE_HEIGHT * 0.6],
+    outputRange: ['rgba(0, 0, 0, 0.3)', 'rgba(17, 131, 71, 0.8)'],
+    extrapolate: 'clamp'
+  });
+  
+  // Don't need to use useLayoutEffect for just headerShown false
+  React.useLayoutEffect(() => {
+    navigation.setOptions({
+      headerShown: false
+    });
+  }, [navigation]);
+  
+  // Replace the existing focus/blur effect with proper tab bar hiding implementation
+  React.useEffect(() => {
+    // Function to hide the bottom tab bar
+    const hideTabBar = () => {
+      // Get the parent navigator (which should be the tab navigator)
+      const parent = navigation.getParent();
+      
+      if (parent) {
+        // Hide the tab bar by setting tabBarStyle to display: none
+        parent.setOptions({
+          tabBarStyle: {
+            display: 'none',
+          },
+          tabBarVisible: false
+        });
+        console.log("Center detail screen focused - tab bar hidden");
+      }
+    };
+    
+    // Function to restore the bottom tab bar
+    const showTabBar = () => {
+      const parent = navigation.getParent();
+      
+      if (parent) {
+        // Restore the tab bar with normal styling
+        parent.setOptions({
+          tabBarStyle: {
+            display: 'flex',
+            backgroundColor: '#FFFFFF',
+            height: Platform.OS === 'ios' ? 100 : 80,
+            paddingTop: 6,
+            paddingBottom: 0,
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: -2 },
+            shadowOpacity: 0.05,
+            shadowRadius: 3,
+            elevation: 3,
+            borderTopColor: '#f0f0f0',
+            borderTopWidth: 1,
+            paddingVertical: 0,
+            marginBottom: 0
+          },
+          tabBarVisible: true
+        });
+        console.log("Center detail screen blurred - tab bar restored");
+      }
+    };
+
+    // Hide tab bar when screen is focused
+    const unsubscribeFocus = navigation.addListener('focus', hideTabBar);
+    
+    // Restore tab bar when leaving the screen
+    const unsubscribeBlur = navigation.addListener('blur', showTabBar);
+
+    // Make sure we hide the tab bar on initial render
+    hideTabBar();
+
+    // Cleanup listeners and restore tab bar when component unmounts
+    return () => {
+      unsubscribeFocus();
+      unsubscribeBlur();
+      showTabBar();
+    };
+  }, [navigation]);
+  
+  const [refreshing, setRefreshing] = useState(false);
+  
+  const [isSaved, setIsSaved] = useState(false);
+  const [isSavingCenter, setIsSavingCenter] = useState(false);
+  
+  // Add snackbar state variables
+  const [snackbarVisible, setSnackbarVisible] = useState(false);
+  const [snackbarMessage, setSnackbarMessage] = useState('');
+  const [snackbarType, setSnackbarType] = useState<'success' | 'error' | 'info'>('info');
+  const snackbarAnimation = useRef(new Animated.Value(0)).current;
+  
+  // Add animation effects for snackbar
+  useEffect(() => {
+    if (snackbarVisible) {
+      // Animate snackbar in
+      Animated.spring(snackbarAnimation, {
+        toValue: 1,
+        useNativeDriver: true,
+        friction: 8,
+        tension: 50
+      }).start();
+    } else {
+      // Animate snackbar out
+      Animated.timing(snackbarAnimation, {
+        toValue: 0,
+        duration: 200,
+        useNativeDriver: true
+      }).start();
+    }
+  }, [snackbarVisible, snackbarAnimation]);
+  
+  // Add this method before the location row JSX block
+  const handleGetDirections = () => {
+    if (center?.latitude && center.longitude) {
+      // Format for Google Maps URL
+      const url = `https://www.google.com/maps/dir/?api=1&destination=${center.latitude},${center.longitude}`;
+      Linking.openURL(url).catch(err => 
+        console.error('Error opening Google Maps:', err)
+      );
+    }
+  };
+  
+  // Update the location display in the render section
+  <View style={styles.locationRow}>
+    <View style={styles.locationInfo}>
+      <Ionicons name="navigate-outline" size={18} color="#666" />
+      <Text style={styles.locationText}>
+        {calculatedDistance || 'Distance not available'}
+      </Text>
+    </View>
+    <TouchableOpacity 
+      style={styles.directionsButton}
+      onPress={handleGetDirections}
+    >
+      <Ionicons name="navigate-outline" size={18} color="#118347" />
+      <Text style={styles.directionsText}>Directions</Text>
+    </TouchableOpacity>
+  </View>
+  
+  React.useEffect(() => {
+    const loadCenterDetails = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        
+        console.log(`Loading center details for ID: ${centerId}`);
+        
+        // Use the Supabase implementation
+        const centerData = await fetchCenterDetails(centerId);
+        
+        if (centerData) {
+          console.log('Center details loaded successfully');
+          setCenter(centerData);
+          
+          // Calculate distance if user coordinates are available
+          if (userCoordinates && centerData.latitude && centerData.longitude) {
+            const lat1 = userCoordinates.latitude;
+            const lon1 = userCoordinates.longitude;
+            const lat2 = typeof centerData.latitude === 'string' 
+              ? parseFloat(centerData.latitude) 
+              : centerData.latitude;
+            const lon2 = typeof centerData.longitude === 'string'
+              ? parseFloat(centerData.longitude)
+              : centerData.longitude;
+            
+            if (!isNaN(lat2) && !isNaN(lon2)) {
+              const distanceKm = calculateDistance(lat1, lon1, lat2, lon2);
+              setCalculatedDistance(formatDistanceInKm(distanceKm));
+            }
+          }
+        } else {
+          console.error('Center not found');
+          setError('Center not found');
+        }
+      } catch (err) {
+        console.error('Error loading center details:', err);
+        setError('Failed to load center details');
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    loadCenterDetails();
+  }, [centerId, userCoordinates]);
+  
+  const handleCallCenter = () => {
+    if (center?.contactPhone) {
+      Linking.openURL(`tel:${center.contactPhone}`);
+    }
+  };
+  
+  const handleEmailCenter = () => {
+    if (center?.contactEmail) {
+      Linking.openURL(`mailto:${center.contactEmail}`);
+    }
+  };
+  
+  const handleVisitWebsite = () => {
+    if (center?.website) {
+      Linking.openURL(center.website);
+    }
+  };
+  
+  const handleOpenInstagram = () => {
+    if (center?.instagramUsername) {
+      // Check if it's a full URL or just a username
+      const instagramUrl = center.instagramUsername.startsWith('http')
+        ? center.instagramUsername
+        : `https://www.instagram.com/${center.instagramUsername}`;
+      
+      Linking.openURL(instagramUrl).catch((err) => {
+        console.error('Error opening Instagram:', err);
+        // Fallback to browser if instagram app isn't installed
+        Linking.openURL(`https://www.instagram.com/${center.instagramUsername}`);
+      });
+    }
+  };
+  
+  // Add state for booking preview overlay
+  const [isBookingPreviewVisible, setIsBookingPreviewVisible] = useState(false);
+  
+  // Add state for booking loading
+  const [isBookingLoading, setIsBookingLoading] = useState(false);
+  
+  // Add state for success message
+  const [showSuccessMessage, setShowSuccessMessage] = useState(false);
+  const successMessageOpacity = useRef(new Animated.Value(0)).current;
+  
+  // Add state for booking preview data
+  const [bookingPreviewData, setBookingPreviewData] = useState<any>(null);
+  
+  // Add state for login overlay
+  const [showLoginOverlay, setShowLoginOverlay] = useState(false);
+  const [loginReturnParams, setLoginReturnParams] = useState<any>(null);
+  
+  // Update the handleBookNow function to remove vibration
+  const handleBookNow = () => {
+    console.log('BOOKING ACTION: Button pressed for center ID:', center?.id);
+    
+    // Check if user is logged in
+    if (!isAuthenticated || !user) {
+      // Show login overlay for guest users instead of Alert
+      setLoginReturnParams({
+        centerId: center?.id,
+        returnScreen: 'Booking'
+      });
+      setShowLoginOverlay(true);
+      return;
+    }
+    
+    if (!center) {
+      Alert.alert('Error', 'Unable to proceed with booking. Please try again.');
+      return;
+    }
+    
+    // Navigate to the full-screen booking session
+    navigation.navigate('Booking', {
+      centerId: center.id,
+      centerName: center.name,
+      centerImage: center.images?.[0] || undefined,
+      centerCategory: typeof center.category === 'object' ? center.category.name : undefined
+    });
+  };
+  
+  // Handle showing the booking preview overlay
+  const handleShowBookingPreview = (previewData: any) => {
+    // Ensure the previewData has valid date format
+    try {
+      // Get the center category name
+      let categoryName = 'Fitness';
+      
+      // Try to get the category from the center object
+      if (center) {
+        if (typeof center.category === 'object' && center.category?.name) {
+          categoryName = center.category.name;
+        } else if (typeof center.category === 'string') {
+          categoryName = center.category;
+        } else if (center.categoryIds && center.categoryIds.length > 0) {
+          // Try to get a human-readable category name from the first categoryId
+          // You would need a helper function like getActivityTypeById from HomeScreen
+          // For now, we'll use a simple mapping
+          const categoryMapping: Record<string, string> = {
+            '1': 'Gym',
+            '2': 'Yoga',
+            '3': 'Swimming',
+            '4': 'Badminton',
+            '5': 'Cricket',
+            '6': 'Zumba',
+            '7': 'Pickle Ball'
+          };
+          const firstCategoryId = center.categoryIds[0];
+          categoryName = categoryMapping[firstCategoryId] || 'Fitness';
+        }
+      }
+      
+      // Create a safer version of the preview data with all required fields
+      const safePreviewData = {
+        // Required fields
+        centerId: previewData?.centerId || center?.id || 'unknown',
+        centerName: previewData?.centerName || center?.name || 'Fitness Center',
+        date: previewData?.date || new Date().toISOString().split('T')[0],
+        formattedDate: previewData?.formattedDate || format(new Date(), 'do MMM yyyy'),
+        timeSlot: previewData?.timeSlot || '12:00 PM',
+        sessionType: previewData?.sessionType || { 
+          id: 'default', 
+          name: 'Standard Session', 
+          price: 0,
+          description: 'Default session' 
+        },
+        totalAmount: typeof previewData?.totalAmount === 'number' ? previewData.totalAmount : 0,
+        walletBalance: previewData?.walletBalance || 0,
+        centerCategory: categoryName, // Add the center category
+        categoryType: previewData?.categoryType || previewData?.sessionType?.name || 'Fitness'
+      };
+      
+      console.log('Setting booking preview data:', safePreviewData);
+      setBookingPreviewData(safePreviewData);
+      
+      // Use a slight delay to create a smooth transition between overlays
+        setTimeout(() => {
+          setIsBookingPreviewVisible(true);
+      }, 100);
+    } catch (error) {
+      console.error('Error preparing booking preview data:', error);
+      Alert.alert('Error', 'Unable to display booking details. Please try again.');
+    }
+  };
+  
+  // Handle going back to booking preview
+  const handleBackToBooking = () => {
+    // Use a slight delay to create a smooth transition between overlays
+    setIsBookingPreviewVisible(false);
+  };
+  
+  // Handle booking confirmation
+  const handleConfirmBooking = async (bookingData: any) => {
+    try {
+      if (!isAuthenticated || !user) {
+        console.error('User not authenticated for booking confirmation');
+        Alert.alert('Authentication Required', 'Please log in to confirm your booking.');
+        return;
+      }
+      
+      setIsBookingLoading(true);
+      
+      // Validate bookingData before proceeding
+      if (!bookingData || !bookingData.centerName || !bookingData.date || 
+          !bookingData.timeSlot || !bookingData.sessionType || 
+          typeof bookingData.totalAmount !== 'number') {
+        throw new Error('Invalid booking data');
+      }
+      
+      // Prepare the booking data for Firebase with safe defaults
+      const firestoreBookingData = {
+        centerId: center?.id || bookingData.centerId || '',
+        centerName: bookingData.centerName || '',
+        centerImage: center?.image || '',
+        date: bookingData.date || '',
+        timeSlot: bookingData.timeSlot || '',
+        sessionType: bookingData.sessionType?.name || 'Standard',
+        price: (bookingData.totalAmount || 0).toString(),
+        status: 'confirmed',
+        createdAt: new Date().toISOString(),
+        centerCategory: bookingData.centerCategory || getCategoryName(center) || 'Fitness',
+        categoryType: bookingData.categoryType || bookingData.sessionType?.name || 'Fitness'
+      };
+      
+      // Function to safely get category name
+      function getCategoryName(center: any): string {
+        if (!center) return 'Fitness';
+        
+        if (typeof center.category === 'object' && center.category?.name) {
+          return center.category.name;
+        }
+        
+        if (typeof center.category === 'string') {
+          return center.category;
+        }
+        
+        return 'Fitness';
+      }
+      
+      // Check wallet balance
+      const userBalance = await getUserWalletBalance(user.id);
+      if (userBalance < bookingData.totalAmount) {
+        Alert.alert(
+          'Insufficient Balance',
+          `Your wallet balance (₹${userBalance.toLocaleString()}) is less than the booking amount (₹${bookingData.totalAmount.toLocaleString()}).\n\nPlease recharge your wallet to continue.`,
+          [
+            {
+              text: 'Cancel',
+              style: 'cancel',
+            },
+            {
+              text: 'Recharge Wallet',
+              onPress: () => {
+                setIsBookingPreviewVisible(false);
+                (navigation as any).navigate('WalletRecharge' as any, { requiredAmount: bookingData.totalAmount });
+              },
+            },
+          ]
+        );
+        setIsBookingLoading(false);
+        return;
+      }
+      
+      // Process payment
+      await deductFromWallet(user.id, bookingData.totalAmount, `Booking at ${bookingData.centerName}`);
+      
+      // Save the booking to Firestore
+      const savedBooking = await saveBooking(firestoreBookingData, user.id);
+      
+      // Close the preview overlay
+      setIsBookingPreviewVisible(false);
+      
+      // Navigate to the full-screen BookingConfirmation screen
+      (navigation as any).navigate('BookingConfirmation', {
+        bookingId: savedBooking?.id || `booking-${Date.now()}`,
+        centerName: bookingData.centerName || 'Fitness Center',
+        date: bookingData.date || '',
+        timeSlot: bookingData.timeSlot || '',
+        price: bookingData.totalAmount || 0,
+        isRescheduled: false,
+        sessionType: bookingData.sessionType?.name || 'Standard Session',
+        centerCategory: bookingData.centerCategory || 'Fitness'
+      });
+      
+    } catch (error) {
+      console.error('Error creating booking:', error);
+      let errorMessage = 'Unable to complete your booking. Please try again.';
+      
+      if (error instanceof Error) {
+        errorMessage = error.message;
+      }
+      
+      Alert.alert('Booking Failed', errorMessage);
+    } finally {
+      setIsBookingLoading(false);
+    }
+  };
+  
+  // Handle view bookings navigation
+  const handleViewBookings = () => {
+    // This function is no longer used with the full-screen component
+    // Keeping it for reference or in case it's still referenced elsewhere
+    
+    // Navigate to the Bookings tab with BookingsList screen
+      navigation.dispatch(
+        CommonActions.navigate({
+        name: 'Bookings',
+        params: {},
+      })
+    );
+  };
+  
+  // Handle go home (stay on current screen)
+  const handleGoHome = () => {
+    // This function is no longer used with the full-screen component
+    // Keeping it for reference or in case it's still referenced elsewhere
+    
+    // Show success message
+    setShowSuccessMessage(true);
+    
+    // Animate success message in
+    Animated.sequence([
+      Animated.timing(successMessageOpacity, {
+        toValue: 1,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+      Animated.delay(3000), // Show for 3 seconds
+      Animated.timing(successMessageOpacity, {
+        toValue: 0,
+        duration: 300,
+        useNativeDriver: true,
+      })
+    ]).start(() => {
+      setShowSuccessMessage(false);
+    });
+    
+    // Show toast on Android
+    if (Platform.OS === 'android') {
+      ToastAndroid.showWithGravity(
+        'Booking confirmed successfully!',
+        ToastAndroid.LONG,
+        ToastAndroid.BOTTOM
+      );
+    }
+  };
+  
+  // Function to handle scroll events for animated header
+  const handleScrollEvent = Animated.event(
+    [{ nativeEvent: { contentOffset: { y: scrollY } } }],
+    { useNativeDriver: false }
+  );
+  
+  // Function to handle image scroll events
+  const handleImageScroll = (event: { nativeEvent: { contentOffset: { x: number } } }) => {
+    const contentOffsetX = event.nativeEvent.contentOffset.x;
+    const currentIndex = Math.round(contentOffsetX / screenWidth);
+    setActiveImageIndex(currentIndex);
+  };
+  
+  // Function to handle opening full-screen image viewer
+  const handleImagePress = (index: number) => {
+    setSelectedImageIndex(index);
+    setIsImageViewerVisible(true);
+    // Reset zoom when opening viewer
+    setScale(1);
+    baseScale.current = 1;
+  };
+  
+  // Function to handle pinch gesture
+  const onPinchGestureEvent = (event: any) => {
+    // Only allow zoom levels between 1 and 5
+    const newScale = Math.min(Math.max(baseScale.current * event.nativeEvent.scale, 1), 5);
+    setScale(newScale);
+  };
+  
+  // Function to handle pinch gesture state change
+  const onPinchHandlerStateChange = (event: any) => {
+    if (event.nativeEvent.oldState === State.BEGAN) {
+      setIsZooming(true);
+    } else if (event.nativeEvent.oldState === State.ACTIVE) {
+      baseScale.current = scale;
+      // Small delay before allowing scrolling again
+      setTimeout(() => {
+        setIsZooming(false);
+      }, 100);
+    }
+  };
+  
+  // Function to close the image viewer
+  const closeImageViewer = () => {
+    setIsImageViewerVisible(false);
+    setScale(1);
+    baseScale.current = 1;
+    setIsZooming(false);
+  };
+  
+  // Function to track image loading state
+  const handleImageLoadStart = (imageId: string) => {
+    setImagesLoading(prev => ({...prev, [imageId]: true}));
+  };
+  
+  const handleImageLoadEnd = (imageId: string) => {
+    setImagesLoading(prev => ({...prev, [imageId]: false}));
+  };
+  
+  // Function to handle full-screen image scroll events
+  const handleFullScreenScroll = (event: { nativeEvent: { contentOffset: { x: number } } }) => {
+    // Only update index if not currently zooming
+    if (!isZooming) {
+      const contentOffsetX = event.nativeEvent.contentOffset.x;
+      const currentIndex = Math.round(contentOffsetX / screenWidth);
+      setSelectedImageIndex(currentIndex);
+      // Reset zoom when scrolling to a new image
+      setScale(1);
+      baseScale.current = 1;
+    }
+  };
+  
+  // Add a refresh function
+  const handleRefresh = useCallback(async () => {
+    try {
+      console.log('Manually refreshing center details...');
+      setRefreshing(true);
+      const centerData = await fetchCenterDetails(centerId);
+      if (centerData) {
+        setCenter(centerData);
+        console.log('Center details refreshed successfully');
+        
+        // Show toast message based on platform
+        if (Platform.OS === 'android') {
+          ToastAndroid.show('Center details updated!', ToastAndroid.SHORT);
+        } else {
+          // For iOS, use Alert or another visual indicator
+          Alert.alert('Updated', 'Center details have been refreshed.', [
+            { text: 'OK', onPress: () => {} }
+          ]);
+        }
+      } else {
+        setError('Center not found');
+      }
+    } catch (err) {
+      console.error('Error refreshing center details:', err);
+      setError('Failed to refresh center details');
+    } finally {
+      setRefreshing(false);
+    }
+  }, [centerId]);
+  
+  // Check if center is saved by current user
+  const checkSavedStatus = useCallback(async () => {
+    try {
+      if (!user?.id || !center?.id) return;
+      
+      console.log(`Checking if center ${center.id} is saved by user ${user.id}`);
+      const saved = await isCenterSaved(user.id, center.id);
+      console.log(`Center saved status: ${saved}`);
+      setIsSaved(saved);
+    } catch (error) {
+      console.error('Error checking saved status:', error);
+      // Try again after a short delay if there was an error
+      setTimeout(() => {
+        if (user?.id && center?.id) {
+          isCenterSaved(user.id, center.id)
+            .then(saved => setIsSaved(saved))
+            .catch(err => console.error('Retry error checking saved status:', err));
+        }
+      }, 1000);
+    }
+  }, [user, center]);
+
+  // Call checkSavedStatus when user or center changes
+  useEffect(() => {
+    if (user?.id && center?.id) {
+      checkSavedStatus();
+    }
+  }, [user, center, checkSavedStatus]);
+
+  // Toggle center saved status with useCallback
+  const handleToggleSave = useCallback(async () => {
+    try {
+      if (!user?.id) {
+        // If user is not logged in, prompt them to login
+        Alert.alert(
+          'Login Required',
+          'Please login to save this center',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { 
+              text: 'Login', 
+              onPress: () => navigation.dispatch(CommonActions.navigate('PhoneAuth'))
+            }
+          ]
+        );
+        return;
+      }
+
+      if (!center?.id) return;
+      
+      setIsSavingCenter(true);
+      
+      // Basic center data to store with the favorite
+      const centerBasicData = {
+        id: center.id,
+        name: center.name,
+        address: center.address,
+        image: center.image || center.images?.[0],
+        category: center.category,
+        activities: center.activities
+      };
+      
+      console.log('Toggling save status for center:', center.id, 'by user:', user.id);
+      // Toggle save status using Supabase implementation
+      const isNowSaved = await toggleSaveCenter(user.id, center.id, centerBasicData);
+      console.log('Center is now saved:', isNowSaved);
+      
+      // Update UI
+      setIsSaved(isNowSaved);
+      
+      // Show feedback to user
+      if (isNowSaved) {
+        // Center was saved
+        Vibration.vibrate(100); // Short vibration for positive feedback
+        
+        // Show visual feedback with custom snackbar
+        setSnackbarMessage('Center saved to favorites');
+        setSnackbarType('success');
+        setSnackbarVisible(true);
+        
+        // Auto-hide snackbar after 3 seconds
+        setTimeout(() => {
+          setSnackbarVisible(false);
+        }, 3000);
+        
+        if (Platform.OS === 'android') {
+          ToastAndroid.show('Center saved to favorites', ToastAndroid.SHORT);
+        }
+      } else {
+        // Center was unsaved
+        setSnackbarMessage('Center removed from favorites');
+        setSnackbarType('info');
+        setSnackbarVisible(true);
+        
+        // Auto-hide snackbar after 3 seconds
+        setTimeout(() => {
+          setSnackbarVisible(false);
+        }, 3000);
+        
+        if (Platform.OS === 'android') {
+          ToastAndroid.show('Center removed from favorites', ToastAndroid.SHORT);
+        }
+      }
+    } catch (error) {
+      console.error('Error toggling save status:', error);
+      
+      // Show error snackbar
+      setSnackbarMessage('Failed to update saved status');
+      setSnackbarType('error');
+      setSnackbarVisible(true);
+      
+      // Auto-hide error snackbar after 3 seconds
+      setTimeout(() => {
+        setSnackbarVisible(false);
+      }, 3000);
+      
+      Alert.alert('Error', 'Failed to update saved status');
+    } finally {
+      setIsSavingCenter(false);
+    }
+  }, [user, center, navigation, setSnackbarMessage, setSnackbarType, setSnackbarVisible, setIsSaved]);
+  
+  const [isImageLoading, setIsImageLoading] = useState(true);
+  
+  if (loading) {
+    return (
+      <View style={[styles.container, styles.loadingContainer]}>
+        <StatusBar translucent backgroundColor="transparent" barStyle="light-content" />
+        <ActivityIndicator size="large" color="#118347" />
+        <Text style={styles.loadingText}>Loading center details...</Text>
+      </View>
+    );
+  }
+  
+  if (error || !center) {
+    return (
+      <View style={[styles.container, styles.errorContainer]}>
+        <StatusBar translucent backgroundColor="transparent" barStyle="light-content" />
+        <Ionicons name="alert-circle-outline" size={60} color="#FF3B30" />
+        <Text style={styles.errorText}>{error || 'Center not found'}</Text>
+        <TouchableOpacity 
+          style={styles.backButton} 
+          onPress={() => navigation.goBack()}
+        >
+          <Text style={styles.backButtonText}>Go Back</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+  
+  // Prepare the images array, use center.images if available, otherwise use single image
+  const centerImages = (center.images && center.images.length > 0) 
+    ? center.images 
+    : [center.image || 'https://images.unsplash.com/photo-1540497077202-7c8a3999166f?q=80&w=1470&auto=format&fit=crop'];
+  
+  const renderCenterInfo = () => (
+    <View style={styles.card}>
+      <View style={styles.centerHeader}>
+        <View style={styles.centerTitleRow}>
+          <Text style={styles.centerName}>{center.name}</Text>
+          <View style={styles.titleRightContainer}>
+            {center?.womenOnly && (
+              <View style={styles.womenOnlyTag}>
+                <Ionicons name="woman" size={14} color="#FF5C8D" />
+                <Text style={styles.womenOnlyText}>Women Only</Text>
+              </View>
+            )}
+            {center?.instagramUsername && (
+              <TouchableOpacity 
+                onPress={() => Linking.openURL(`https://instagram.com/${center.instagramUsername}`)}
+                style={styles.instagramButton}
+              >
+                <Ionicons name="logo-instagram" size={20} color="#E4405F" />
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+        
+        <View style={styles.locationRow}>
+          <View style={styles.locationInfo}>
+            <Ionicons name="location-outline" size={18} color="#666" />
+            <Text style={styles.locationText}>
+              {extractLocationShortForm(center.address || center.location)}
+            </Text>
+          </View>
+        </View>
+        
+        <View style={styles.locationRow}>
+          <View style={styles.locationInfo}>
+            <Ionicons name="navigate-outline" size={18} color="#666" />
+            <Text style={styles.locationText}>
+              {calculatedDistance || 'Distance not available'}
+            </Text>
+          </View>
+          <TouchableOpacity 
+            style={styles.directionsButton}
+            onPress={handleGetDirections}
+          >
+            <Ionicons name="navigate-outline" size={18} color="#118347" />
+            <Text style={styles.directionsText}>Directions</Text>
+          </TouchableOpacity>
+        </View>
+        
+        <View style={styles.divider} />
+        
+        {center.description && (
+          <Text style={styles.descriptionText}>{center.description}</Text>
+        )}
+      </View>
+    </View>
+  );
+  
+  return (
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaView style={styles.container} edges={['bottom']}>
+        <StatusBar translucent backgroundColor="transparent" barStyle="light-content" />
+        
+        {/* Header Buttons - Now outside of image loading state */}
+        <View style={styles.headerButtons}>
+          <TouchableOpacity 
+            style={styles.headerButton}
+            onPress={() => navigation.goBack()}
+          >
+            <Ionicons name="arrow-back" size={24} color="#FFF" />
+          </TouchableOpacity>
+          
+          <TouchableOpacity 
+            style={styles.headerButton}
+            onPress={handleToggleSave}
+            disabled={isSavingCenter}
+          >
+            <Ionicons 
+              name={isSaved ? "heart" : "heart-outline"} 
+              size={24} 
+              color={isSaved ? "#FF3B30" : "#FFF"} 
+            />
+          </TouchableOpacity>
+        </View>
+
+        {/* Footer with Book Now button - Moved outside ScrollView */}
+        <View style={styles.footer}>
+          <View style={styles.footerContent}>
+            <View style={styles.priceContainer}>
+              <Text style={styles.priceLabel}>Price per Session</Text>
+              <Text style={styles.priceValue}>
+                {center?.pricePerSession ? `₹${center.pricePerSession}` : 'Not available'}
+              </Text>
+            </View>
+            <TouchableOpacity 
+              style={styles.bookingButton}
+              onPress={handleBookNow}
+            >
+              <Text style={styles.bookingButtonText}>Book Slot</Text>
+              <Ionicons name="arrow-forward" size={20} color="#FFF" />
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* Main Scrollable Content */}
+        <ScrollView 
+          style={styles.scrollView} 
+          contentContainerStyle={styles.scrollViewContent}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              colors={['#118347']}
+              tintColor="#118347"
+            />
+          }
+        >
+          {/* Image Gallery */}
+          <View style={styles.galleryContainer}>
+            {isImageLoading && (
+              <SkeletonView 
+                width="100%" 
+                height={300} 
+                style={styles.skeletonImage}
+              />
+            )}
+            <FlatList
+              ref={flatListRef}
+              data={centerImages}
+              renderItem={({ item, index }) => (
+                <TouchableOpacity 
+                  activeOpacity={0.9}
+                  onPress={() => handleImagePress(index)}
+                >
+                  <View style={styles.centerImageContainer}>
+                    <Image
+                      source={{ uri: item }}
+                      style={[
+                        styles.centerImage,
+                        isImageLoading && styles.hiddenImage
+                      ]}
+                      resizeMode="cover"
+                      onLoadStart={() => {
+                        handleImageLoadStart(`gallery-${index}`);
+                        setIsImageLoading(true);
+                      }}
+                      onLoadEnd={() => {
+                        handleImageLoadEnd(`gallery-${index}`);
+                        setIsImageLoading(false);
+                      }}
+                      onError={() => {
+                        handleImageLoadEnd(`gallery-${index}`);
+                        setIsImageLoading(false);
+                      }}
+                    />
+                    {imagesLoading[`gallery-${index}`] && (
+                      <View style={styles.imageLoadingContainer}>
+                        <ActivityIndicator size="large" color="#FFFFFF" />
+                      </View>
+                    )}
+                  </View>
+                </TouchableOpacity>
+              )}
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
+              onScroll={handleImageScroll}
+              scrollEventThrottle={16}
+              keyExtractor={(_, index) => `image-${index}`}
+              decelerationRate="fast"
+            />
+            
+            {/* Pagination Dots */}
+            {centerImages.length > 1 && (
+              <View style={styles.paginationContainer}>
+                {centerImages.map((_, index: number) => (
+                  <View 
+                    key={`dot-${index}`}
+                    style={[
+                      styles.paginationDot,
+                      index === activeImageIndex && styles.paginationDotActive
+                    ]}
+                  />
+                ))}
+              </View>
+            )}
+          </View>
+          
+            {/* Content Cards */}
+          <View style={styles.contentContainer}>
+              {/* Center Info Card */}
+              <View style={styles.card}>
+                <View style={styles.centerHeader}>
+                  <View style={styles.centerTitleRow}>
+                    <Text style={styles.centerName}>{center.name}</Text>
+                    <View style={styles.titleRightContainer}>
+                      {center?.womenOnly && (
+                        <View style={styles.womenOnlyTag}>
+                          <Ionicons name="woman" size={14} color="#FF5C8D" />
+                          <Text style={styles.womenOnlyText}>Women Only</Text>
+                        </View>
+                      )}
+                      {center?.instagramUsername && (
+                        <TouchableOpacity 
+                          onPress={() => Linking.openURL(`https://instagram.com/${center.instagramUsername}`)}
+                          style={styles.instagramButton}
+                        >
+                          <Ionicons name="logo-instagram" size={20} color="#E4405F" />
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  </View>
+                  
+                  <View style={styles.locationRow}>
+                    <View style={styles.locationInfo}>
+                      <Ionicons name="location-outline" size={18} color="#666" />
+                      <Text style={styles.locationText}>
+                        {extractLocationShortForm(center.address || center.location)}
+                      </Text>
+                    </View>
+                  </View>
+                  
+                  <View style={styles.locationRow}>
+                    <View style={styles.locationInfo}>
+                      <Ionicons name="navigate-outline" size={18} color="#666" />
+                      <Text style={styles.locationText}>
+                        {calculatedDistance || 'Distance not available'}
+                      </Text>
+                    </View>
+                    <TouchableOpacity 
+                      style={styles.directionsButton}
+                      onPress={handleGetDirections}
+                    >
+                      <Ionicons name="navigate-outline" size={18} color="#118347" />
+                      <Text style={styles.directionsText}>Directions</Text>
+                    </TouchableOpacity>
+                  </View>
+                  
+                  <View style={styles.divider} />
+                  
+                  {center.description && (
+                    <Text style={styles.descriptionText}>{center.description}</Text>
+                  )}
+                </View>
+              </View>
+            
+              {/* Amenities Card */}
+              {(center && ((center.amenities && center.amenities.length > 0) || 
+                (center.facilities && center.facilities.length > 0))) && (
+                <View style={styles.card}>
+                  <Text style={styles.cardTitle}>Available Amenities</Text>
+                  
+                  {/* Tab Buttons */}
+                  <View style={styles.tabContainer}>
+                    <TouchableOpacity 
+                      style={[
+                        styles.tabButton,
+                        selectedTab === 'equipment' && styles.tabButtonActive
+                      ]}
+                      onPress={() => setSelectedTab('equipment')}
+                    >
+                      <Text style={[
+                        styles.tabButtonText,
+                        selectedTab === 'equipment' && styles.tabButtonTextActive
+                      ]}>Equipment</Text>
+                    </TouchableOpacity>
+                    
+                    <TouchableOpacity 
+                      style={[
+                        styles.tabButton,
+                        selectedTab === 'facilities' && styles.tabButtonActive
+                      ]}
+                      onPress={() => setSelectedTab('facilities')}
+                    >
+                      <Text style={[
+                        styles.tabButtonText,
+                        selectedTab === 'facilities' && styles.tabButtonTextActive
+                      ]}>Facilities</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* Tab Content */}
+                  <View style={styles.tabContent}>
+                    {selectedTab === 'equipment' && center.amenities && center.amenities.length > 0 ? (
+                      <View style={styles.amenitiesContainer}>
+                        {center.amenities.map((item, index) => (
+                          <View key={`equipment-${index}`} style={styles.amenityChip}>
+                            <Ionicons name={getAmenityIcon(item)} size={16} color="#118347" />
+                            <Text style={styles.amenityChipText}>{item}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    ) : selectedTab === 'facilities' && center.facilities && center.facilities.length > 0 ? (
+                      <View style={styles.amenitiesContainer}>
+                        {center.facilities.map((item, index) => (
+                          <View key={`facility-${index}`} style={styles.amenityChip}>
+                            <Ionicons name={getAmenityIcon(item)} size={16} color="#118347" />
+                            <Text style={styles.amenityChipText}>{item}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    ) : (
+                      <Text style={styles.noAmenitiesText}>
+                        No {selectedTab} available
+                      </Text>
+                    )}
+                  </View>
+                </View>
+              )}
+              
+              {/* Additional Info Card */}
+              <View style={styles.card}>
+                <View style={styles.infoRow}>
+                  <Ionicons name="location-outline" size={20} color="#666666" />
+                  <View style={styles.infoContent}>
+                    <Text style={styles.infoLabel}>Address</Text>
+                    <Text style={styles.infoValue}>{center?.address || 'Not available'}</Text>
+                  </View>
+                </View>
+
+                <View style={styles.infoRow}>
+                  <Ionicons name="pricetag-outline" size={20} color="#666666" />
+                  <View style={styles.infoContent}>
+                    <Text style={styles.infoLabel}>Price per Session</Text>
+                    <Text style={styles.infoValue}>
+                      {center?.pricePerSession ? `₹${center.pricePerSession}` : 'Not available'}
+                    </Text>
+                  </View>
+                </View>
+              </View>
+              
+              {/* Things to Know Card */}
+              <View style={[styles.card, { paddingHorizontal: 20, paddingVertical: 20 }]}>
+                <Text style={styles.cardTitle}>Things to Know</Text>
+                <View style={styles.thingsToKnowList}>
+                  <View style={styles.thingsToKnowItem}>
+                    <Ionicons name="time-outline" size={22} color="#118347" />
+                    <Text style={styles.thingsToKnowText}>Please arrive 10 minutes before your session</Text>
+                  </View>
+                  <View style={styles.thingsToKnowItem}>
+                    <Ionicons name="water-outline" size={22} color="#118347" />
+                    <Text style={styles.thingsToKnowText}>Bring your own water bottle and towel</Text>
+                  </View>
+                  <View style={styles.thingsToKnowItem}>
+                    <Ionicons name="shirt-outline" size={22} color="#118347" />
+                    <Text style={styles.thingsToKnowText}>Wear comfortable workout clothes and shoes</Text>
+                  </View>
+                  <View style={styles.thingsToKnowItem}>
+                    <Ionicons name="card-outline" size={22} color="#118347" />
+                    <Text style={styles.thingsToKnowText}>Carry your ID proof for first-time visit</Text>
+                  </View>
+                  <View style={styles.thingsToKnowItem}>
+                    <Ionicons name="medical-outline" size={22} color="#118347" />
+                    <Text style={styles.thingsToKnowText}>Inform trainers about any health conditions</Text>
+                  </View>
+                </View>
+              </View>
+          </View>
+        </ScrollView>
+        
+        {/* Full Screen Image Viewer */}
+        <Modal
+            visible={isImageViewerVisible}
+            transparent={true}
+          animationType="fade"
+          onRequestClose={closeImageViewer}
+            statusBarTranslucent
+          >
+            <View style={styles.imageViewerContainer}>
+              <FlatList
+                ref={fullScreenFlatListRef}
+                data={centerImages}
+                horizontal
+                pagingEnabled
+                showsHorizontalScrollIndicator={false}
+                onScroll={!isZooming ? handleFullScreenScroll : undefined}
+                scrollEventThrottle={16}
+                keyExtractor={(_, index) => `fullscreen-${index}`}
+                decelerationRate="fast"
+                initialScrollIndex={selectedImageIndex}
+                getItemLayout={(data, index) => ({
+                  length: screenWidth,
+                  offset: screenWidth * index,
+                  index,
+                })}
+                scrollEnabled={!isZooming}
+                style={{ flex: 1 }}
+                renderItem={({ item, index }) => (
+                  <View style={{ width: screenWidth, overflow: 'hidden' }}>
+                  <PinchGestureHandler
+                    ref={pinchRef}
+                    onGestureEvent={onPinchGestureEvent}
+                    onHandlerStateChange={onPinchHandlerStateChange}
+                  >
+                      <Animated.View style={styles.fullScreenImageContainer}>
+                        <Animated.Image
+                        source={{ uri: item }}
+                        style={[
+                          styles.fullScreenImage,
+                            {
+                              transform: [{ scale }]
+                            }
+                        ]}
+                        onLoadStart={() => handleImageLoadStart(`fullscreen-${index}`)}
+                        onLoadEnd={() => handleImageLoadEnd(`fullscreen-${index}`)}
+                      />
+                      {imagesLoading[`fullscreen-${index}`] && (
+                          <View style={styles.fullScreenLoadingContainer}>
+                            <ActivityIndicator size="large" color="#FFFFFF" />
+                    </View>
+                        )}
+                      </Animated.View>
+                  </PinchGestureHandler>
+                  </View>
+                )}
+              />
+              
+              <View style={styles.imageViewerHeader}>
+                <TouchableOpacity 
+                  style={styles.closeButton}
+                  onPress={closeImageViewer}
+                >
+                  <Ionicons name="close" size={24} color="#FFF" />
+                </TouchableOpacity>
+                <Text style={styles.imageCounter}>
+                  {selectedImageIndex + 1} / {centerImages.length}
+                </Text>
+              </View>
+            </View>
+          </Modal>
+
+        {/* Login Overlay for guest users */}
+        <LoginOverlay 
+          visible={showLoginOverlay}
+          onClose={() => setShowLoginOverlay(false)}
+          returnScreen="Booking"
+          returnParams={loginReturnParams}
+        />
+      </SafeAreaView>
+    </GestureHandlerRootView>
+  );
+}
+
+export default CenterDetailScreen; 

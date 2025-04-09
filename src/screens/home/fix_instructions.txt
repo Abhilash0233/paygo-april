@@ -1,0 +1,53 @@
+FIXING THE USERNAME DISPLAY IN HOMESCREEN.TSX
+
+The issue is that there's an attempt to use React hooks (useState, useEffect) outside of a function component, which is not allowed by React's rules.
+
+Here's how to fix it:
+
+1. REMOVE any userData declarations OUTSIDE the HomeScreen function. Look for lines like:
+   ```
+   const userData = { name: "John" };
+   ```
+   or
+   ```
+   const [userData, setUserData] = useState<{name: string}>({ ... });
+   ```
+   that appear BEFORE the "function HomeScreen() {" line.
+
+2. ADD the following code INSIDE the HomeScreen function, right after the wallet line:
+
+   ```
+   const { walletBalance, isLoading: isWalletLoading } = useWallet();
+  
+   // User data with real username
+   const [userData, setUserData] = useState<{name: string}>({
+     name: "User",
+   });
+   ```
+
+3. ADD the following useEffect INSIDE the HomeScreen function, after the welcome overlay params useEffect:
+
+   ```
+   // Fetch user profile for welcome message
+   useEffect(() => {
+     const fetchUserProfile = async () => {
+       try {
+         const currentUser = auth.currentUser;
+         if (currentUser) {
+           const profile = await getUserProfile(currentUser.uid);
+           if (profile && profile.displayName) {
+             setUserData({ name: profile.displayName });
+             console.log("Set user display name to:", profile.displayName);
+           }
+         }
+       } catch (error) {
+         console.error("Error fetching user profile:", error);
+       }
+     };
+    
+     fetchUserProfile();
+   }, []);
+   ```
+
+Once these changes are made, the user's real name should appear in the welcome section of the HomeScreen.
+

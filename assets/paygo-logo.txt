@@ -1,0 +1,11 @@
+The PayGo.fit logo should have the following characteristics:
+
+1. A circle with gradient from #118347 to #0A5D31 (light to dark green)
+2. The letters "PGO" in white inside the circle
+3. The ".fit" part is in a lighter green color (#4CD964)
+4. The logo should be simple, modern, and represent fitness/sports
+5. The logo should look good in both light and dark backgrounds
+6. It should be recognizable at small sizes (for app icons)
+
+This placeholder text file serves as a reference for designers to create the actual logo.
+For now, we're using the existing splash-icon.png in the app. 

@@ -1,0 +1,72 @@
+{
+  "expo": {
+    "name": "Paygo.fit",
+    "slug": "paygofit-app",
+    "version": "1.2.4",
+    "orientation": "portrait",
+    "icon": "./assets/main2.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "experiments": {
+      "bridgeless": false
+    },
+    "splash": {
+      "image": "./assets/main2.png",
+      "backgroundColor": "#ffffff",
+      "resizeMode": "contain"
+    },
+    "updates": {
+      "fallbackToCacheTimeout": 0
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "fit.paygo",
+      "buildNumber": "40",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "This app uses your location to find nearby fitness centers and provide location-based recommendations.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "This app uses your location to find nearby fitness centers and provide location-based recommendations.",
+        "NSCameraUsageDescription": "This app uses the camera to scan QR codes for checking in at fitness centers.",
+        "UIBackgroundModes": [
+          "fetch"
+        ]
+      },
+      "developmentTeam": "VC5PMBL6V9",
+      "minVersion": "14.0"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/main2.png",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.paygofit.app",
+      "versionCode": 40,
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.WAKE_LOCK",
+        "CAMERA"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/main2.png"
+    },
+    "plugins": [
+      "expo-location",
+      "expo-notifications",
+      "expo-background-fetch",
+      "expo-barcode-scanner"
+    ],
+    "description": "An app for booking sessions at nearby fitness centers",
+    "extra": {
+      "eas": {
+        "projectId": "4451704b-2328-4ff3-92cb-7f8ce80356b6"
+      }
+    }
+  }
+}
