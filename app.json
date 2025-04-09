@@ -57,10 +57,26 @@
       "favicon": "./assets/main2.png"
     },
     "plugins": [
-      "expo-location",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "This app uses your location to find nearby fitness centers and provide location-based recommendations."
+        }
+      ],
       "expo-notifications",
       "expo-background-fetch",
-      "expo-barcode-scanner"
+      [
+        "expo-barcode-scanner",
+        {
+          "cameraPermission": "This app uses the camera to scan QR codes for checking in at fitness centers."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "This app uses the camera to scan QR codes for checking in at fitness centers."
+        }
+      ]
     ],
     "description": "An app for booking sessions at nearby fitness centers",
     "extra": {
